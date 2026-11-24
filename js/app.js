@@ -6,6 +6,7 @@ import { Library, HLS, DASH } from './library.js';
 import * as media from './media.js';
 import { durationMs } from './anim.js';
 import { uploadFile, isMedia } from './upload.js';
+import { addFromLink, extractUrl } from './links.js';
 
 const lib = new Library();
 const CLIENT_KEY = 'mm.clientId';
@@ -421,6 +422,7 @@ function homeScreen(top) {
       h('div', { class: 'grow' }, h('div', { class: 'title gradient' }, 'Media Manager'), h('div', { class: 'muted small' }, subtitle)),
       search,
       tab === 'scenes' ? h('button', { class: 'btn primary', onclick: () => openLiveDialog() }, '▶ Live scene') : null,
+      tab === 'files' ? h('button', { class: 'btn', onclick: () => openLinkDialog('') }, '🔗 Add link') : null,
       tab === 'files' ? h('button', { class: 'btn primary', onclick: chooseUpload }, '⬆ Upload') : null,
       tab === 'tags' || tab === 'people'
         ? h('button', { class: 'btn', onclick: () => newLabel(tab === 'people' ? 'PERSON' : 'TAG') }, '+ New')
@@ -484,7 +486,7 @@ function filesTab() {
       onclick: () => push({ view: 'list', source: { type, title } }),
     }, h('div', { class: 'type-icon' }, type === 'video' ? '▶' : type === 'gif' ? 'GIF' : '▣'),
     h('div', {}, h('div', { class: 'type-title' }, title), h('div', { class: 'small' }, countText(lib.items.filter((i) => i.type === type).length)))))),
-  h('p', { class: 'muted small drop-hint' }, 'Drop pictures, videos or whole folders anywhere on this page (or use ⬆ Upload) to add them to your Drive.'));
+  h('p', { class: 'muted small drop-hint' }, 'Drop pictures, videos or whole folders anywhere on this page (or use ⬆ Upload) to add them to your Drive. To add something that stays on its website, use 🔗 Add link or just paste the link here (Ctrl+V).'));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -633,6 +635,61 @@ document.addEventListener('drop', (e) => {
   if (ui.stage !== 'main' || !(e.dataTransfer?.files?.length || e.dataTransfer?.items?.length)) return;
   e.preventDefault();
   droppedFiles(e.dataTransfer).then(startUploads, failed);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Adding from a link (the file stays on its website, like the phone's "Add from a link")
+
+function openLinkDialog(initial) {
+  const state = { text: initial, busy: false, step: '', error: '' };
+  const add = async () => {
+    if (state.busy || !state.text.trim()) return;
+    Object.assign(state, { busy: true, error: '', step: 'Looking at the link…' });
+    renderModal();
+    try {
+      const { key, existed } = await addFromLink(lib, state.text, (step) => { state.step = step; renderModal(); });
+      closeModal();
+      const item = lib.itemByKey.get(key);
+      if (existed) toast('That link is already in your library');
+      if (item) push({ view: 'viewer', list: [item], index: 0 });
+    } catch (e) {
+      if (e instanceof drive.AuthError) {
+        state.busy = false;
+        closeModal();
+        failed(e);
+        return;
+      }
+      Object.assign(state, { busy: false, error: e.message || String(e) });
+      renderModal();
+    }
+  };
+  openModal({
+    title: 'Add from a link',
+    body: () => h('div', {},
+      h('p', { class: 'muted small' }, 'Paste a link to a video, GIF or picture, or to a page that shows one (Reddit, Imgur…). It plays from the website and isn\'t uploaded to Drive.'),
+      h('input', {
+        class: 'field', placeholder: 'https://…', value: state.text, 'data-focus': 'link', disabled: state.busy,
+        oninput: (e) => { state.text = e.target.value; state.error = ''; },
+        onkeydown: (e) => e.key === 'Enter' && add(),
+      }),
+      state.busy ? h('div', { class: 'row', style: { marginTop: '12px' } }, h('div', { class: 'spinner', style: { width: '18px', height: '18px', borderWidth: '2px' } }), h('span', { class: 'muted' }, state.step)) : null,
+      state.error ? h('p', { class: 'error small' }, state.error) : null),
+    actions: () => [
+      h('button', { class: 'btn', disabled: state.busy, onclick: closeModal }, 'Cancel'),
+      h('button', { class: 'btn primary', disabled: state.busy, onclick: add }, 'Add'),
+    ],
+  });
+  setTimeout(() => $modal.querySelector('[data-focus="link"]')?.focus());
+  if (initial) add();
+}
+
+// Pasting a link anywhere on the main screens adds it.
+document.addEventListener('paste', (e) => {
+  if (ui.stage !== 'main' || ui.modal || /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  const url = extractUrl(e.clipboardData?.getData('text') || '');
+  if (!url) return;
+  e.preventDefault();
+  openLinkDialog(url);
 });
 
 function labelsTab(kind, query) {

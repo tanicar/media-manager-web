@@ -421,7 +421,7 @@ function homeScreen(top) {
       h('div', { class: 'grow' }, h('div', { class: 'title gradient' }, 'Media Manager'), h('div', { class: 'muted small' }, subtitle)),
       search,
       tab === 'scenes' ? h('button', { class: 'btn primary', onclick: () => openLiveDialog() }, '▶ Live scene') : null,
-      tab === 'files' ? h('button', { class: 'btn primary', onclick: pickFiles }, '⬆ Upload') : null,
+      tab === 'files' ? h('button', { class: 'btn primary', onclick: chooseUpload }, '⬆ Upload') : null,
       tab === 'tags' || tab === 'people'
         ? h('button', { class: 'btn', onclick: () => newLabel(tab === 'people' ? 'PERSON' : 'TAG') }, '+ New')
         : null,
@@ -484,31 +484,77 @@ function filesTab() {
       onclick: () => push({ view: 'list', source: { type, title } }),
     }, h('div', { class: 'type-icon' }, type === 'video' ? '▶' : type === 'gif' ? 'GIF' : '▣'),
     h('div', {}, h('div', { class: 'type-title' }, title), h('div', { class: 'small' }, countText(lib.items.filter((i) => i.type === type).length)))))),
-  h('p', { class: 'muted small drop-hint' }, 'Drop pictures and videos anywhere on this page (or use ⬆ Upload) to add them to your Drive.'));
+  h('p', { class: 'muted small drop-hint' }, 'Drop pictures, videos or whole folders anywhere on this page (or use ⬆ Upload) to add them to your Drive.'));
 }
 
 // ---------------------------------------------------------------------------------------------
 // Uploading from this computer
 
-const up = { queue: [], total: 0, done: 0, current: null, fraction: 0, keys: [], failed: [], running: false, open: false };
+const up = { people: new Map(), queue: [], total: 0, done: 0, current: null, fraction: 0, keys: [], failed: [], running: false, open: false };
 const $uploads = h('div', { id: 'uploads' });
 document.body.append($uploads);
 
-function pickFiles() {
-  const input = h('input', { type: 'file', multiple: true, accept: 'image/*,video/*' });
-  input.addEventListener('change', () => startUploads(input.files));
+function chooseUpload() {
+  openModal({
+    title: 'Upload',
+    body: () => h('div', { class: 'menu' },
+      h('button', { class: 'btn wide', onclick: () => { closeModal(); pickFiles(false); } }, '🖼  Pictures and videos'),
+      h('button', { class: 'btn wide', onclick: () => { closeModal(); pickFiles(true); } }, '📁  A folder'),
+      h('p', { class: 'muted small' },
+        'With a folder, each folder inside it becomes a participant: everything in Folder → Anna → … gets the participant “Anna” (a new one is added if needed). Files directly in the chosen folder get no participant. You can also drop folders onto the page.')),
+    actions: () => [h('button', { class: 'btn', onclick: closeModal }, 'Cancel')],
+  });
+}
+
+function pickFiles(folder) {
+  const input = h('input', { type: 'file', multiple: true, accept: folder ? null : 'image/*,video/*' });
+  if (folder) input.webkitdirectory = true;
+  input.addEventListener('change', () => startUploads([...input.files].map((file) => ({ file, path: file.webkitRelativePath || file.name }))));
   input.click();
 }
 
-function startUploads(fileList) {
-  const all = [...fileList];
-  const files = all.filter(isMedia);
+/**
+ * The participant for a file picked or dropped with its folder: the name of the folder just inside
+ * the chosen one ("Folder1/Person1/…/media1" → "Person1"). None for files directly in it.
+ */
+function personFromPath(path) {
+  const parts = path.split('/').filter(Boolean);
+  return parts.length >= 3 ? parts[1].trim() || null : null;
+}
+
+/** Everything in a dropped item: a file, or a whole folder read recursively, with their paths. */
+async function droppedFiles(dataTransfer) {
+  const entries = [...(dataTransfer.items || [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...dataTransfer.files].map((file) => ({ file, path: file.name }));
+  const out = [];
+  const walk = async (entry) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      out.push({ file, path: entry.fullPath.replace(/^\//, '') });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        // readEntries returns at most ~100 entries per call.
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) break;
+        for (const e of batch) await walk(e);
+      }
+    }
+  };
+  for (const e of entries) await walk(e);
+  return out;
+}
+
+function startUploads(picked) {
+  const files = picked.filter((p) => isMedia(p.file) && !p.file.name.startsWith('.'))
+    .map((p) => ({ file: p.file, person: personFromPath(p.path) }));
+  const skipped = picked.filter((p) => !p.file.name.startsWith('.')).length - files.length;
   if (!files.length) {
     toast('Only pictures and videos can be added');
     return;
   }
-  if (files.length < all.length) toast(`${all.length - files.length} files skipped (not pictures or videos)`);
-  if (!up.running && !up.queue.length) Object.assign(up, { total: 0, done: 0, keys: [], failed: [] });
+  if (skipped > 0) toast(`${plural(skipped, 'file')} skipped (not pictures or videos)`);
+  if (!up.running && !up.queue.length) Object.assign(up, { total: 0, done: 0, keys: [], failed: [], people: new Map() });
   up.queue.push(...files);
   up.total += files.length;
   up.open = true;
@@ -519,15 +565,22 @@ function startUploads(fileList) {
 async function runUploads() {
   up.running = true;
   while (up.queue.length) {
-    const file = up.queue[0];
+    const { file, person } = up.queue[0];
     up.current = file.name;
     up.fraction = 0;
     renderUploads();
     try {
-      up.keys.push(await uploadFile(lib, file, (x) => {
+      const key = await uploadFile(lib, file, (x) => {
         up.fraction = x;
         renderUploads();
-      }));
+      });
+      up.keys.push(key);
+      if (person) {
+        const uid = lib.createLabel('PERSON', person);
+        lib.setAssigned([{ key }], uid, true);
+        const name = lib.labelById.get(uid)?.name || person;
+        up.people.set(name, (up.people.get(name) || 0) + 1);
+      }
     } catch (e) {
       if (e instanceof drive.AuthError) {
         // Continues after signing in again.
@@ -562,6 +615,7 @@ function renderUploads() {
       ]
       : [
         h('div', {}, `${plural(up.keys.length, 'file')} uploaded`),
+        up.people?.size ? h('div', { class: 'muted small' }, 'Participants: ', [...up.people].map(([n, c]) => `${n} (${c})`).join(', ')) : null,
         up.failed.map((f) => h('div', { class: 'error small' }, f)),
         h('div', { class: 'row' },
           items.length ? h('button', { class: 'btn primary', onclick: () => openEditData(items) }, 'Edit data') : null,
@@ -574,9 +628,9 @@ document.addEventListener('dragover', (e) => {
   if (ui.stage === 'main' && e.dataTransfer?.types?.includes('Files')) e.preventDefault();
 });
 document.addEventListener('drop', (e) => {
-  if (ui.stage !== 'main' || !e.dataTransfer?.files?.length) return;
+  if (ui.stage !== 'main' || !(e.dataTransfer?.files?.length || e.dataTransfer?.items?.length)) return;
   e.preventDefault();
-  startUploads(e.dataTransfer.files);
+  droppedFiles(e.dataTransfer).then(startUploads, failed);
 });
 
 function labelsTab(kind, query) {

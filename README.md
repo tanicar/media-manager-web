@@ -7,6 +7,9 @@ they're encrypted in the browser exactly like the phone does it. A whole folder 
 too: each folder inside it becomes a participant for everything it contains
 (`Folder1/Anna/…/photo.jpg` gets the participant "Anna", reusing an existing one with that name;
 a folder named "Anna, Ben" gives both).
+Links can be added too (🔗 Add link, or paste a link anywhere): like on the phone, the file stays on
+its website. Direct links to a file and Reddit posts work in the browser; other pages only when the
+site allows web pages to read it (CORS). For those, add the link from the phone.
 
 Everything runs in the browser: there is no server. The page signs in with Google, reads the
 "Media Manager" folder in Drive, and decrypts files locally when the folder is password-protected.
@@ -28,6 +31,7 @@ Nothing in this repository is secret.
 
 - `js/crypto.js`: the phone's encryption format (AES-256-GCM in 1 MiB chunks, PBKDF2 password).
 - `js/library.js`: the shared library file and the merge rules (same as the phone's Sync.kt).
+- `js/links.js`: adding from a link (the phone's WebResolver: Reddit JSON, og:video/<video> tags).
 - `js/upload.js`: uploads from this computer (encrypted 1 MiB chunks, sent in 8 MiB parts, plus a thumbnail).
 - `sw.js`: a service worker that streams videos, downloading and decrypting only the parts being played.
 - `js/app.js`: the interface.

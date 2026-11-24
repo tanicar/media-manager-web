@@ -31,48 +31,71 @@ async function imagesFolderId(lib) {
 
 /** A small JPEG of the picture, or of the frame 1 s into a video. Null if the browser can't read it. */
 export async function makeThumb(file, mime) {
-  let source;
-  let w;
-  let hgt;
   if (mime.startsWith('video/')) {
     const url = URL.createObjectURL(file);
     try {
-      const video = document.createElement('video');
-      video.muted = true;
-      video.preload = 'auto';
-      video.src = url;
-      await new Promise((resolve, reject) => {
-        video.onloadeddata = resolve;
-        video.onerror = () => reject(new Error('unreadable video'));
-        // Some formats never load or fail in some browsers: don't hold up the upload queue for them.
-        setTimeout(() => reject(new Error('video thumbnail timed out')), THUMB_WAIT_MS);
-      });
-      video.currentTime = Math.min(1, (video.duration || 0) / 2);
-      await new Promise((resolve) => {
-        video.onseeked = resolve;
-        setTimeout(resolve, 3000);
-      });
-      source = video;
-      w = video.videoWidth;
-      hgt = video.videoHeight;
-      return await drawThumb(source, w, hgt);
-    } catch {
-      return null;
+      return await videoThumb(url);
     } finally {
       URL.revokeObjectURL(url);
     }
   }
   try {
-    source = await createImageBitmap(file);
-    w = source.width;
-    hgt = source.height;
-    return await drawThumb(source, w, hgt);
+    const bitmap = await createImageBitmap(file);
+    return await drawThumb(bitmap, bitmap.width, bitmap.height);
   } catch {
     return null;
   }
 }
 
-async function drawThumb(source, w, hgt) {
+/**
+ * A small JPEG of the frame 1 s into the video at [src]. For a video on another website this only
+ * works when the site allows it (CORS); null otherwise.
+ */
+export async function videoThumb(src, crossOrigin = false) {
+  let video = null;
+  try {
+    video = document.createElement('video');
+    video.muted = true;
+    video.preload = 'auto';
+    if (crossOrigin) video.crossOrigin = 'anonymous';
+    video.src = src;
+    await new Promise((resolve, reject) => {
+      video.onloadeddata = resolve;
+      video.onerror = () => reject(new Error('unreadable video'));
+      // Some formats never load or fail in some browsers: don't hold up the upload queue for them.
+      setTimeout(() => reject(new Error('video thumbnail timed out')), THUMB_WAIT_MS);
+    });
+    video.currentTime = Math.min(1, (video.duration || 0) / 2);
+    await new Promise((resolve) => {
+      video.onseeked = resolve;
+      setTimeout(resolve, 3000);
+    });
+    return await drawThumb(video, video.videoWidth, video.videoHeight);
+  } catch {
+    return null;
+  } finally {
+    // Releases the video.
+    video?.removeAttribute('src');
+    try {
+      video?.load();
+    } catch {
+      // nothing to release
+    }
+  }
+}
+
+/** Puts a thumbnail in the library's pictures folder (encrypted when the folder is). Returns its Drive id. */
+export async function saveThumb(lib, bytes) {
+  const encrypted = lib.encrypted;
+  return drive.uploadSmall(
+    `${crypto.randomUUID()}${encrypted ? '.mmv' : '.jpg'}`,
+    await imagesFolderId(lib),
+    encrypted ? 'application/octet-stream' : 'image/jpeg',
+    await lib.protect(bytes),
+  );
+}
+
+export async function drawThumb(source, w, hgt) {
   if (!w || !hgt) return null;
   const scale = Math.min(1, THUMB_SIDE / Math.max(w, hgt));
   const canvas = document.createElement('canvas');
@@ -138,14 +161,7 @@ export async function uploadFile(lib, file, onProgress = () => {}) {
   // Thumbnail (shown in lists on every device).
   let thumbId = null;
   const thumb = await makeThumb(file, mime);
-  if (thumb) {
-    thumbId = await drive.uploadSmall(
-      `${crypto.randomUUID()}${encrypted ? '.mmv' : '.jpg'}`,
-      await imagesFolderId(lib),
-      encrypted ? 'application/octet-stream' : 'image/jpeg',
-      await lib.protect(thumb),
-    );
-  }
+  if (thumb) thumbId = await saveThumb(lib, thumb);
 
   // Animated WebP/PNG count as GIFs, like on the phone.
   let animated = null;

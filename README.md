@@ -3,7 +3,10 @@
 The browser version of the Media Manager Android app. It shows the same library (files, tags,
 participants, scenes, live scenes) from the same Google Drive folder, and edits made here sync
 with the phone. Pictures and videos can also be uploaded from here (⬆ Upload, or drag and drop):
-they're encrypted in the browser exactly like the phone does it.
+they're encrypted in the browser exactly like the phone does it. A whole folder can be uploaded
+too: each folder inside it becomes a participant for everything it contains
+(`Folder1/Anna/…/photo.jpg` gets the participant "Anna", reusing an existing one with that name;
+a folder named "Anna, Ben" gives both).
 
 Everything runs in the browser: there is no server. The page signs in with Google, reads the
 "Media Manager" folder in Drive, and decrypts files locally when the folder is password-protected.

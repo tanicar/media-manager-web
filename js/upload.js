@@ -9,6 +9,7 @@ import { durationMs } from './anim.js';
 const PART = 8 << 20; // a multiple of Drive's 256 KiB upload unit
 const IMAGES = 'Library images';
 const THUMB_SIDE = 640;
+export const THUMB_WAIT_MS = 10_000;
 
 const MIME_BY_EXT = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic',
@@ -43,6 +44,8 @@ export async function makeThumb(file, mime) {
       await new Promise((resolve, reject) => {
         video.onloadeddata = resolve;
         video.onerror = () => reject(new Error('unreadable video'));
+        // Some formats never load or fail in some browsers: don't hold up the upload queue for them.
+        setTimeout(() => reject(new Error('video thumbnail timed out')), THUMB_WAIT_MS);
       });
       video.currentTime = Math.min(1, (video.duration || 0) / 2);
       await new Promise((resolve) => {

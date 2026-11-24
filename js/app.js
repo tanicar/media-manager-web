@@ -501,7 +501,7 @@ function chooseUpload() {
       h('button', { class: 'btn wide', onclick: () => { closeModal(); pickFiles(false); } }, '🖼  Pictures and videos'),
       h('button', { class: 'btn wide', onclick: () => { closeModal(); pickFiles(true); } }, '📁  A folder'),
       h('p', { class: 'muted small' },
-        'With a folder, each folder inside it becomes a participant: everything in Folder → Anna → … gets the participant “Anna” (a new one is added if needed). Files directly in the chosen folder get no participant. You can also drop folders onto the page.')),
+        'With a folder, each folder inside it becomes a participant: everything in Folder → Anna → … gets the participant “Anna” (a new one is added if needed). A folder named “Anna, Ben” gives both. Files directly in the chosen folder get no participant. You can also drop folders onto the page.')),
     actions: () => [h('button', { class: 'btn', onclick: closeModal }, 'Cancel')],
   });
 }
@@ -514,12 +514,14 @@ function pickFiles(folder) {
 }
 
 /**
- * The participant for a file picked or dropped with its folder: the name of the folder just inside
- * the chosen one ("Folder1/Person1/…/media1" → "Person1"). None for files directly in it.
+ * The participants for a file picked or dropped with its folder: the name of the folder just inside
+ * the chosen one ("Folder1/Person1/…/media1" → Person1), split at commas ("Person1, Person2" → both).
+ * None for files directly in the chosen folder.
  */
-function personFromPath(path) {
+function peopleFromPath(path) {
   const parts = path.split('/').filter(Boolean);
-  return parts.length >= 3 ? parts[1].trim() || null : null;
+  if (parts.length < 3) return [];
+  return [...new Set(parts[1].split(',').map((n) => n.trim()).filter(Boolean))];
 }
 
 /** Everything in a dropped item: a file, or a whole folder read recursively, with their paths. */
@@ -547,7 +549,7 @@ async function droppedFiles(dataTransfer) {
 
 function startUploads(picked) {
   const files = picked.filter((p) => isMedia(p.file) && !p.file.name.startsWith('.'))
-    .map((p) => ({ file: p.file, person: personFromPath(p.path) }));
+    .map((p) => ({ file: p.file, people: peopleFromPath(p.path) }));
   const skipped = picked.filter((p) => !p.file.name.startsWith('.')).length - files.length;
   if (!files.length) {
     toast('Only pictures and videos can be added');
@@ -565,7 +567,7 @@ function startUploads(picked) {
 async function runUploads() {
   up.running = true;
   while (up.queue.length) {
-    const { file, person } = up.queue[0];
+    const { file, people } = up.queue[0];
     up.current = file.name;
     up.fraction = 0;
     renderUploads();
@@ -575,7 +577,7 @@ async function runUploads() {
         renderUploads();
       });
       up.keys.push(key);
-      if (person) {
+      for (const person of people) {
         const uid = lib.createLabel('PERSON', person);
         lib.setAssigned([{ key }], uid, true);
         const name = lib.labelById.get(uid)?.name || person;

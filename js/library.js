@@ -1,12 +1,12 @@
 // The shared library in Drive, read and written in the same format as the phone (Sync.kt).
 //
 // The library is a set of records (key -> JSON):
-//   L:<uid> tag/participant {k, n, t?}       A:<media key>\t<label uid> assignment (1)
+//   L:<uid> tag/participant {k, n, t?, x?}   A:<media key>\t<label uid> assignment (1)
 //   C:<media key> cover {p, t?}              D:<media key> file in Drive {f, n, m, s, d, e, t?}
 //   W:<media key> file from the web {n, m, p?, a, t?}
 //   S:<uid> scene {n, k: [keys], p: {label uid: bool}, t?}
 //   X:<media key> animated-image check [modified, 0/1]
-// "t" is the Drive id of a thumbnail picture. Saving merges with what other devices wrote since:
+// "t" is the Drive id of a thumbnail picture, "x" a tag's description. Saving merges with what other devices wrote since:
 // a record changed on one side takes that side's version; if both changed it, this device wins.
 
 import * as drive from './drive.js';
@@ -262,7 +262,7 @@ export class Library {
       switch (k.slice(0, 2)) {
         case 'L:': {
           const o = JSON.parse(v);
-          labels.set(id, { uid: id, kind: o.k, name: o.n, thumb: o.t || null });
+          labels.set(id, { uid: id, kind: o.k, name: o.n, thumb: o.t || null, about: o.x || null });
           break;
         }
         case 'A:': {
@@ -354,9 +354,11 @@ export class Library {
 
   // ---- Edits (values are built in the same field order as the phone) ----
 
-  labelValue(kind, name, thumb) {
+  labelValue(kind, name, thumb, about) {
     const o = { k: kind, n: name };
     if (thumb) o.t = thumb;
+    // A tag's description (set on the phone, used there for tag suggestions): kept as it is.
+    if (about) o.x = about;
     return JSON.stringify(o);
   }
 
@@ -384,7 +386,7 @@ export class Library {
     if (this.labels.some((o) => o.uid !== uid && o.kind === l.kind && o.name.toLowerCase() === name.toLowerCase())) {
       throw new Error(`There is already a ${l.kind === 'PERSON' ? 'participant' : 'tag'} called "${name}"`);
     }
-    this.change(() => this.records.set(`L:${uid}`, this.labelValue(l.kind, name, l.thumb)));
+    this.change(() => this.records.set(`L:${uid}`, this.labelValue(l.kind, name, l.thumb, l.about)));
   }
 
   deleteLabel(uid) {

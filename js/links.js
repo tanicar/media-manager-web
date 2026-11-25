@@ -64,6 +64,13 @@ function unescape(s) {
 
 const cleanName = (t) => (t ? unescape(t).replace(/\s+/g, ' ').trim().slice(0, 120) || null : null);
 const absolute = (base, link) => new URL(unescape(link.trim()), base).toString();
+const absoluteOrNull = (base, link) => {
+  try {
+    return absolute(base, link);
+  } catch {
+    return null;
+  }
+};
 
 /**
  * What the link leads to: {url, mime, name, page, poster}. Throws a LinkError with a message for the
@@ -144,38 +151,107 @@ function meta(html, property) {
   return v && v.trim() ? v : null;
 }
 
-/** The media type of a candidate link: from its name, or by asking the server. Null if it isn't media. */
-async function mediaType(url) {
+/** What a candidate link serves: a media type, 'page' for a web page (e.g. an embedded player), or null. */
+async function linkKind(url) {
   const byName = mimeFromName(url);
   if (byName) return byName;
   try {
     const r = await fetch(url, { headers: { Range: 'bytes=0-0' } });
     r.body?.cancel().catch(() => {});
+    if (!r.ok) return null;
     const t = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-    return isMediaType(t) ? normalize(t) : null;
+    if (isMediaType(t)) return normalize(t);
+    return t.includes('html') ? 'page' : null;
   } catch {
     return null;
   }
 }
 
-export async function fromPage(pageUrl, html) {
+const VIDEO_FILE = /\.(?:mp4|m4v|webm|mov|m3u8)$/i;
+/** Video files the page names anywhere, also inside scripts and JSON ("https:\/\/…\/clip.mp4"). */
+export function videoUrlsIn(html, pageUrl) {
+  const out = [];
+  const add = (raw, anyName) => {
+    const s = raw.replace(/\\\//g, '/').replace(/\\u0026/gi, '&').replace(/\\u002F/gi, '/').replace(/&amp;/g, '&');
+    try {
+      const u = new URL(s, pageUrl);
+      if (/^https?:$/.test(u.protocol) && (anyName || VIDEO_FILE.test(u.pathname))) out.push(u.toString());
+    } catch {
+      // not a link
+    }
+  };
+  // Structured data first: schema.org VideoObject "contentUrl" and players' video settings, which
+  // may have no file extension (the server is asked what they are).
+  for (const m of html.matchAll(/["']?(?:contentUrl|contentURL|video_url|videoUrl|video_src|videoSrc|hls|hlsUrl|mp4)["']?\s*[:=]\s*["']([^"']+)["']/g)) add(m[1], true);
+  // Then any video file the page names, e.g. "src":"…/clip.mp4" or file:"…/master.m3u8".
+  for (const m of html.matchAll(/["']?(?:src|url|file|source)["']?\s*[:=]\s*["']([^"']+)["']/g)) add(m[1], false);
+  for (const m of html.matchAll(/https?:(?:\\?\/){2}[^"'\s<>()]+/g)) add(m[0], false);
+  // Previews and trailers are the last resort.
+  const weak = (u) => /preview|thumb|trailer|teaser|sample/i.test(u);
+  return [...new Set(out)].sort((a, b) => weak(a) - weak(b));
+}
+
+/** Whether the page says it is about a video (so its picture alone is not what was meant). */
+export function looksLikeVideoPage(html) {
+  const type = meta(html, 'og:type') || '';
+  return type.startsWith('video') || meta(html, 'twitter:card') === 'player' || !!meta(html, 'og:video')
+    || !!meta(html, 'og:video:url') || !!meta(html, 'og:video:secure_url') || /<video\b/i.test(html)
+    || /"@type"\s*:\s*"VideoObject"/.test(html);
+}
+
+export async function fromPage(pageUrl, html, depth = 0, fetchPage = fetchText) {
   const titleTag = /<title[^>]*>(.*?)<\/title>/is.exec(html);
   const name = cleanName(meta(html, 'og:title') || (titleTag && titleTag[1])) || nameFor(pageUrl);
   const posterRaw = meta(html, 'og:image:secure_url') || meta(html, 'og:image') || meta(html, 'twitter:image');
   const poster = posterRaw ? absolute(pageUrl, posterRaw) : null;
-  const tags = [meta(html, 'og:video:secure_url'), meta(html, 'og:video:url'), meta(html, 'og:video'), meta(html, 'twitter:player:stream')]
+
+  // 1. What the page declares, and its <video> tags.
+  const declared = [meta(html, 'og:video:secure_url'), meta(html, 'og:video:url'), meta(html, 'og:video'), meta(html, 'twitter:player:stream')]
     .filter(Boolean);
-  for (const m of html.matchAll(/<(?:video|source)\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gis)) tags.push(m[1]);
-  for (const raw of [...new Set(tags.map((t) => absolute(pageUrl, t)))]) {
-    const mime = await mediaType(raw);
-    if (mime) return { url: raw, mime, name, page: pageUrl, poster };
+  for (const m of html.matchAll(/<(?:video|source)\b[^>]*?\b(?:data-)?src\s*=\s*["']([^"']+)["']/gis)) declared.push(m[1]);
+  // 2. Video files named in the page's scripts and data (sites whose player builds the video later).
+  const candidates = [...new Set([...declared.map((t) => absoluteOrNull(pageUrl, t)).filter(Boolean), ...videoUrlsIn(html, pageUrl)])];
+  // 3. Embedded players: the page of the player itself.
+  const embeds = [meta(html, 'twitter:player')].filter(Boolean);
+  for (const m of html.matchAll(/"embedUrl"\s*:\s*"([^"]+)"/g)) embeds.push(m[1].replace(/\\\//g, '/'));
+  for (const m of html.matchAll(/<iframe\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gis)) embeds.push(m[1]);
+
+  for (const url of candidates.slice(0, 15)) {
+    const kind = await linkKind(url);
+    if (kind === 'page') embeds.unshift(url);
+    else if (kind && !kind.startsWith('image/')) return { url, mime: kind, name, page: pageUrl, poster };
   }
-  // No video: the page's main picture (often the GIF or image itself).
+  if (depth < 1) {
+    for (const raw of [...new Set(embeds)].slice(0, 3)) {
+      const url = absoluteOrNull(pageUrl, raw);
+      if (!url || url === pageUrl) continue;
+      const inner = await fetchPage(url, pageUrl).catch(() => null);
+      if (!inner) continue;
+      try {
+        const found = await fromPage(url, inner, depth + 1, fetchPage);
+        if (!found.mime.startsWith('image/')) return { ...found, name, page: pageUrl, poster: found.poster || poster };
+      } catch {
+        // try the next one
+      }
+    }
+  }
+  // Pictures: the page's main picture (often the GIF or image itself), but not for a video page,
+  // where it is only the video's preview.
+  if (looksLikeVideoPage(html)) {
+    throw new LinkError('This page has a video, but its player hides where the video file is, so only its preview picture could be found.');
+  }
   if (poster) {
-    const mime = await mediaType(poster);
-    if (mime) return { url: poster, mime, name, page: pageUrl, poster: null };
+    const kind = await linkKind(poster);
+    if (kind && kind !== 'page') return { url: poster, mime: kind, name, page: pageUrl, poster: null };
   }
   throw new LinkError('No video or picture found on that page');
+}
+
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  const t = (r.headers.get('content-type') || '').toLowerCase();
+  return t.includes('html') || t.includes('xml') || !t ? r.text() : null;
 }
 
 // ---- Reddit ----
